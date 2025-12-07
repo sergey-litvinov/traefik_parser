@@ -1,0 +1,147 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build and Release
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git-
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-target-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-target-release-
+
+      - name: Build release binary
+        run: cargo build --release --verbose
+
+      - name: Run tests
+        run: cargo test --release --verbose
+
+      - name: Get version from Cargo.toml
+        id: get_version
+        shell: pwsh
+        run: |
+          $version = Select-String -Path "Cargo.toml" -Pattern '^version = "(.+)"' | ForEach-Object { $_.Matches.Groups[1].Value }
+          echo "VERSION=$version" >> $env:GITHUB_OUTPUT
+          echo "Version: $version"
+
+      - name: Get commit count
+        id: commit_count
+        shell: pwsh
+        run: |
+          $count = git rev-list --count HEAD
+          echo "COUNT=$count" >> $env:GITHUB_OUTPUT
+          echo "Commit count: $count"
+
+      - name: Create release tag
+        id: create_tag
+        shell: pwsh
+        run: |
+          $version = "${{ steps.get_version.outputs.VERSION }}"
+          $count = "${{ steps.commit_count.outputs.COUNT }}"
+          $tag = "v$version-build.$count"
+          echo "TAG=$tag" >> $env:GITHUB_OUTPUT
+          echo "Release tag: $tag"
+
+      - name: Prepare release artifacts
+        shell: pwsh
+        run: |
+          $artifactDir = "release-artifacts"
+          New-Item -ItemType Directory -Force -Path $artifactDir
+
+          # Copy the executable
+          Copy-Item "target\release\traefik_log_parser.exe" "$artifactDir\"
+
+          # Copy README
+          Copy-Item "README.md" "$artifactDir\"
+
+          # Copy sample log if exists
+          if (Test-Path "sample_access.log") {
+            Copy-Item "sample_access.log" "$artifactDir\"
+          }
+
+          # Create a zip archive
+          Compress-Archive -Path "$artifactDir\*" -DestinationPath "traefik_log_parser-windows-x64.zip" -Force
+
+          echo "Artifacts prepared in $artifactDir"
+          Get-ChildItem $artifactDir
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.create_tag.outputs.TAG }}
+          name: Release ${{ steps.create_tag.outputs.TAG }}
+          body: |
+            ## Traefik Access Log Parser - Windows Release
+
+            Automatically built from commit: ${{ github.sha }}
+
+            ### Changes
+            Latest changes from main branch.
+
+            ### Installation
+            1. Download `traefik_log_parser-windows-x64.zip`
+            2. Extract the archive
+            3. Place `traefik_log_parser.exe` in your Traefik directory
+            4. Ensure Traefik is configured to write JSON access logs to `access.log`
+            5. Run `traefik_log_parser.exe`
+
+            ### Requirements
+            - Windows (x64)
+            - Traefik with JSON access logging enabled
+
+            See README.md for detailed usage instructions.
+          files: |
+            traefik_log_parser-windows-x64.zip
+            target/release/traefik_log_parser.exe
+            README.md
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: traefik_log_parser-windows-x64
+          path: |
+            target/release/traefik_log_parser.exe
+            README.md
+          retention-days: 30
